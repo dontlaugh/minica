@@ -24,6 +24,26 @@ import (
 	"time"
 )
 
+const usage = `
+Minica is a simple CA intended for use in situations where the CA operator
+also operates each host where a certificate will be used. It automatically
+generates both a key and a certificate when asked to produce a certificate.
+It does not offer OCSP or CRL services. Minica is appropriate, for instance,
+for generating certificates for RPC systems or microservices.
+
+On first run, minica will generate a keypair and a root certificate in the
+current directory, and will reuse that same keypair and root certificate
+unless they are deleted.
+
+On each run, minica will generate a new keypair and sign an end-entity (leaf)
+certificate for that keypair. The certificate will contain a list of DNS names
+and/or IP addresses from the command line flags. The key and certificate are
+placed in a new directory whose name is chosen as the first domain name from
+the certificate, or the first IP address if no domain names are present. It
+will not overwrite existing keys or certificates.
+
+`
+
 func main() {
 	err := main2()
 	if err != nil {
@@ -213,14 +233,15 @@ func calculateSKID(pubKey crypto.PublicKey) ([]byte, error) {
 	return skid[:], nil
 }
 
-func sign(iss *issuer, domains []string, ipAddresses []string) (*x509.Certificate, error) {
-	var cn string
-	if len(domains) > 0 {
-		cn = domains[0]
-	} else if len(ipAddresses) > 0 {
-		cn = ipAddresses[0]
-	} else {
-		return nil, fmt.Errorf("must specify at least one domain name or IP address")
+func sign(iss *issuer, cn string, domains []string, ipAddresses []string) (*x509.Certificate, error) {
+	if cn == "" {
+		if len(domains) > 0 {
+			cn = domains[0]
+		} else if len(ipAddresses) > 0 {
+			cn = ipAddresses[0]
+		} else {
+			return nil, fmt.Errorf("must specify at least one domain name or IP address")
+		}
 	}
 	var cnFolder = strings.Replace(cn, "*", "_", -1)
 	err := os.Mkdir(cnFolder, 0700)
@@ -285,31 +306,16 @@ func split(s string) (results []string) {
 }
 
 func main2() error {
-	var caKey = flag.String("ca-key", "minica-key.pem", "Root private key filename, PEM encoded.")
-	var caCert = flag.String("ca-cert", "minica.pem", "Root certificate filename, PEM encoded.")
-	var domains = flag.String("domains", "", "Comma separated domain names to include as Server Alternative Names.")
-	var ipAddresses = flag.String("ip-addresses", "", "Comma separated IP addresses to include as Server Alternative Names.")
+	var (
+		caKey       = flag.String("ca-key", "minica-key.pem", "Root private key filename, PEM encoded.")
+		caCert      = flag.String("ca-cert", "minica.pem", "Root certificate filename, PEM encoded.")
+		domains     = flag.String("domains", "", "Comma separated domain names to include as Server Alternative Names.")
+		cn          = flag.String("cn", "", "Common Name for certificate; if not provied, CN is populated with first domain or IP")
+		ipAddresses = flag.String("ip-addresses", "", "Comma separated IP addresses to include as Server Alternative Names.")
+	)
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage of %s:\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, `
-Minica is a simple CA intended for use in situations where the CA operator
-also operates each host where a certificate will be used. It automatically
-generates both a key and a certificate when asked to produce a certificate.
-It does not offer OCSP or CRL services. Minica is appropriate, for instance,
-for generating certificates for RPC systems or microservices.
-
-On first run, minica will generate a keypair and a root certificate in the
-current directory, and will reuse that same keypair and root certificate
-unless they are deleted.
-
-On each run, minica will generate a new keypair and sign an end-entity (leaf)
-certificate for that keypair. The certificate will contain a list of DNS names
-and/or IP addresses from the command line flags. The key and certificate are
-placed in a new directory whose name is chosen as the first domain name from
-the certificate, or the first IP address if no domain names are present. It
-will not overwrite existing keys or certificates.
-
-`)
+		fmt.Fprintf(os.Stderr, "Usage:\n")
+		fmt.Fprintf(os.Stderr, usage)
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -318,28 +324,25 @@ will not overwrite existing keys or certificates.
 		os.Exit(1)
 	}
 	if len(flag.Args()) > 0 {
-		fmt.Printf("Extra arguments: %s (maybe there are spaces in your domain list?)\n", flag.Args())
-		os.Exit(1)
+		return fmt.Errorf("Extra arguments: %s (maybe there are spaces in your domain list?)\n", flag.Args())
 	}
 	domainSlice := split(*domains)
 	domainRe := regexp.MustCompile("^[A-Za-z0-9.*-]+$")
 	for _, d := range domainSlice {
 		if !domainRe.MatchString(d) {
-			fmt.Printf("Invalid domain name %q\n", d)
-			os.Exit(1)
+			return fmt.Errorf("Invalid domain name %q\n", d)
 		}
 	}
 	ipSlice := split(*ipAddresses)
 	for _, ip := range ipSlice {
 		if net.ParseIP(ip) == nil {
-			fmt.Printf("Invalid IP address %q\n", ip)
-			os.Exit(1)
+			return fmt.Errorf("Invalid IP address %q\n", ip)
 		}
 	}
 	issuer, err := getIssuer(*caKey, *caCert)
 	if err != nil {
 		return err
 	}
-	_, err = sign(issuer, domainSlice, ipSlice)
+	_, err = sign(issuer, *cn, domainSlice, ipSlice)
 	return err
 }
